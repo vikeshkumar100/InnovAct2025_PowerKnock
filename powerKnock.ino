@@ -32,11 +32,13 @@ unsigned long accessStartTime = 0;
 const unsigned long accessDuration = 10000; 
 
 // --- RFID UIDs and knock patterns ---
-uint8_t allowedUIDs[2][4] = {
-  {0xCD, 0x22, 0x0C, 0x06},  // Card 1
-  {0x3A, 0xE8, 0x1B, 0x06}   // Card 2
+uint8_t allowedUIDs[4][4] = {
+  {0xF3, 0x4C, 0x5E, 0xEC},  // Card 1
+  {0x1A, 0x87, 0xCA, 0x62},  // Card 2
+  {0x9A, 0x5E, 0xA1, 0x62},  // Card 3
+  {0x5A, 0xA9, 0xCF, 0x62}   // Card 4
 };
-int knockPatterns[2] = {3, 5}; // corresponding knock counts
+int knockPatterns[4] = {3, 7, 2, 5}; // corresponding knock counts
 int currentRequiredKnocks = 0;
 bool rfidMatched = false;
 int currentCardIndex = -1;
@@ -50,6 +52,7 @@ bool prevB = HIGH;
 unsigned long lastATime = 0;
 unsigned long lastBTime = 0;
 const unsigned long MAX_DIFF = 1000; // 1 second max difference
+bool counted = false; // for IR debounce
 
 // --- Motor Relay ---
 const int motorRelayPin = 26;
@@ -139,7 +142,7 @@ void checkRFID(){
 
     if(success){
       bool allowed = false;
-      for(int i=0; i<2; i++){
+      for(int i=0; i<4; i++){
         allowed = true;
         for(int j=0; j<4; j++){
           if(uid[j] != allowedUIDs[i][j]){
@@ -207,23 +210,30 @@ void detectKnock(){
 void checkIR(){
   int stateA = digitalRead(irA);
   int stateB = digitalRead(irB);
+  unsigned long now = millis();
 
   // Detect falling edges
-  if(stateA == LOW && prevA == HIGH) lastATime = millis();
-  if(stateB == LOW && prevB == HIGH) lastBTime = millis();
+  if(stateA == LOW && prevA == HIGH) lastATime = now;
+  if(stateB == LOW && prevB == HIGH) lastBTime = now;
 
   // Both triggered within MAX_DIFF
   if(lastATime && lastBTime){
     long diff = (long)lastATime - (long)lastBTime;
-    if(abs(diff) < MAX_DIFF){
+
+    if(abs(diff) < MAX_DIFF && !counted){
       if(diff < 0) totalPersons++;  // A->B Entry
-      else {                        // B->A Exit
-        totalPersons--;
-        if(totalPersons < 0) totalPersons = 0;
-      }
+      else totalPersons--;           // B->A Exit
+      if(totalPersons < 0) totalPersons = 0;
+
       Serial.print("Total persons: "); Serial.println(totalPersons);
+      counted = true;  // mark counted
+    }
+
+    // Reset after counting
+    if(abs(diff) >= MAX_DIFF || (stateA == HIGH && stateB == HIGH)){
       lastATime = 0;
       lastBTime = 0;
+      counted = false;
     }
   }
 
