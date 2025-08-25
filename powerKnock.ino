@@ -7,7 +7,6 @@
 #define PN532_MOSI 13
 #define PN532_MISO 35
 #define PN532_SS   25
-
 Adafruit_PN532 nfc(PN532_SS);
 
 // --- Servo ---
@@ -30,27 +29,27 @@ unsigned long lastKnockDetected = 0;
 // --- Servo timing ---
 bool accessGranted = false;
 unsigned long accessStartTime = 0;
-const unsigned long accessDuration = 10000;
+const unsigned long accessDuration = 10000; 
 
 // --- RFID UIDs and knock patterns ---
 uint8_t allowedUIDs[2][4] = {
-  {0xCD, 0x22, 0x0C, 0x06},
-  {0x3A, 0xE8, 0x1B, 0x06}
+  {0xCD, 0x22, 0x0C, 0x06},  // Card 1
+  {0x3A, 0xE8, 0x1B, 0x06}   // Card 2
 };
-int knockPatterns[2] = {3, 5};
+int knockPatterns[2] = {3, 5}; // corresponding knock counts
 int currentRequiredKnocks = 0;
 bool rfidMatched = false;
 int currentCardIndex = -1;
 
 // --- IR Sensors ---
-const int irA = 12;
-const int irB = 14;
+const int irA = 22;
+const int irB = 23;
 int totalPersons = 0;
-bool aFirst = false;
-bool bFirst = false;
-bool counted = false;
-unsigned long lastTriggerTime = 0;
-const unsigned long IR_TIMEOUT = 2000;
+bool prevA = HIGH;
+bool prevB = HIGH;
+unsigned long lastATime = 0;
+unsigned long lastBTime = 0;
+const unsigned long MAX_DIFF = 1000; // 1 second max difference
 
 // --- Motor Relay ---
 const int motorRelayPin = 26;
@@ -61,7 +60,7 @@ void setup() {
 
   // Servo setup
   myServo.attach(servoPin);
-  myServo.write(180); // Closed
+  myServo.write(180); // closed
 
   // LED setup
   pinMode(ledPin, OUTPUT);
@@ -88,27 +87,27 @@ void setup() {
   nfc.SAMConfig();
   Serial.println("Waiting for RFID card...");
 
-  // IR sensors
+  // IR sensor setup
   pinMode(irA, INPUT);
   pinMode(irB, INPUT);
 
-  // Motor relay
+  // Motor relay setup
   pinMode(motorRelayPin, OUTPUT);
-  if(relayActiveLow) digitalWrite(motorRelayPin, HIGH);
-  else digitalWrite(motorRelayPin, LOW);
+  if(relayActiveLow) digitalWrite(motorRelayPin, HIGH); // OFF
+  else digitalWrite(motorRelayPin, LOW); // OFF
 }
 
 void loop() {
   unsigned long now = millis();
 
-  // --- RFID + Knock ---
+  // RFID + Knock Logic
   checkRFID();
   detectKnock();
 
-  // --- IR sensor ---
-  checkIR(now);
+  // IR Sensor counting (independent of door)
+  checkIR();
 
-  // --- Access duration ---
+  // Access duration for servo
   if(accessGranted && now - accessStartTime >= accessDuration){
     myServo.write(180);  // close
     digitalWrite(ledPin, LOW);
@@ -117,10 +116,19 @@ void loop() {
     currentCardIndex = -1;
   }
 
-  delay(10);
+  // Motor relay control
+  if(totalPersons > 0){
+    if(relayActiveLow) digitalWrite(motorRelayPin, LOW);
+    else digitalWrite(motorRelayPin, HIGH);
+  } else{
+    if(relayActiveLow) digitalWrite(motorRelayPin, HIGH);
+    else digitalWrite(motorRelayPin, LOW);
+  }
+
+  delay(10); // small delay for loop stability
 }
 
-// =================== Functions ===================
+// ----------------- Functions -----------------
 
 void checkRFID(){
   if(!rfidMatched && !accessGranted){
@@ -156,7 +164,7 @@ void checkRFID(){
         Serial.println("RFID wrong!");
         blinkLED(2);
       }
-      delay(500);
+      delay(500); // debounce
     }
   }
 }
@@ -172,9 +180,10 @@ void detectKnock(){
     Serial.print("Knock detected! Count: "); Serial.println(knockCount);
     blinkLED(1);
   }
+
   if(val < threshold) knockActive = false;
 
-  // Check knock pattern after user stops knocking
+  // Evaluate knock pattern after pause
   if(rfidMatched && knockCount > 0 && (now - lastKnockDetected > interKnockTimeout)){
     if(knockCount == currentRequiredKnocks){
       Serial.println("Access granted!");
@@ -185,47 +194,44 @@ void detectKnock(){
     } else {
       Serial.println("Wrong knock pattern. Scan RFID again.");
       blinkLED(2);
-      rfidMatched = false;  // require new RFID
+      rfidMatched = false;
     }
+
     knockCount = 0;
     lastKnockDetected = 0;
     currentCardIndex = -1;
   }
 }
 
-void checkIR(unsigned long now){
+// ---------------- IR counting independent ----------------
+void checkIR(){
   int stateA = digitalRead(irA);
   int stateB = digitalRead(irB);
 
-  if(stateA == 0 && !aFirst && !bFirst) { aFirst = true; lastTriggerTime = now; }
-  if(stateB == 0 && !bFirst && !aFirst) { bFirst = true; lastTriggerTime = now; }
+  // Detect falling edges
+  if(stateA == LOW && prevA == HIGH) lastATime = millis();
+  if(stateB == LOW && prevB == HIGH) lastBTime = millis();
 
-  if(stateA == 0 && stateB == 0 && !counted){
-    if(aFirst && !bFirst) totalPersons++;
-    else if(bFirst && !aFirst) totalPersons--;
-    if(totalPersons < 0) totalPersons = 0;
-    Serial.print("Total persons: "); Serial.println(totalPersons);
-    counted = true;
+  // Both triggered within MAX_DIFF
+  if(lastATime && lastBTime){
+    long diff = (long)lastATime - (long)lastBTime;
+    if(abs(diff) < MAX_DIFF){
+      if(diff < 0) totalPersons++;  // A->B Entry
+      else {                        // B->A Exit
+        totalPersons--;
+        if(totalPersons < 0) totalPersons = 0;
+      }
+      Serial.print("Total persons: "); Serial.println(totalPersons);
+      lastATime = 0;
+      lastBTime = 0;
+    }
   }
 
-  if(stateA == 1 && stateB == 1){
-    aFirst = false; bFirst = false; counted = false; lastTriggerTime = 0;
-  }
-
-  if(lastTriggerTime > 0 && (now - lastTriggerTime > IR_TIMEOUT)){
-    aFirst = false; bFirst = false; counted = false; lastTriggerTime = 0;
-  }
-
-  // Motor control
-  if(totalPersons > 0){
-    if(relayActiveLow) digitalWrite(motorRelayPin, LOW);
-    else digitalWrite(motorRelayPin, HIGH);
-  } else{
-    if(relayActiveLow) digitalWrite(motorRelayPin, HIGH);
-    else digitalWrite(motorRelayPin, LOW);
-  }
+  prevA = stateA;
+  prevB = stateB;
 }
 
+// --- LED blink function ---
 void blinkLED(int times){
   for(int i=0; i<times; i++){
     digitalWrite(ledPin, HIGH);
